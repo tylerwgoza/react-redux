@@ -1,7 +1,11 @@
+/*eslint-disable react/prop-types*/
+
 import expect from 'expect'
-import React, { createClass, Children, PropTypes, Component } from 'react'
+import React, { Children, Component } from 'react'
+import createClass from 'create-react-class'
+import PropTypes from 'prop-types'
 import ReactDOM from 'react-dom'
-import TestUtils from 'react-addons-test-utils'
+import TestUtils from 'react-dom/test-utils'
 import { createStore } from 'redux'
 import { connect } from '../../src/index'
 
@@ -9,21 +13,44 @@ describe('React', () => {
   describe('connect', () => {
     class Passthrough extends Component {
       render() {
-        return <div {...this.props} />
+        return <div />
       }
     }
 
     class ProviderMock extends Component {
-      static childContextTypes = {
-        store: PropTypes.object.isRequired
-      }
-
       getChildContext() {
         return { store: this.props.store }
       }
 
       render() {
         return Children.only(this.props.children)
+      }
+    }
+    ProviderMock.childContextTypes = {
+      store: PropTypes.object.isRequired
+    }
+
+    class ContextBoundStore {
+      constructor(reducer) {
+        this.reducer = reducer
+        this.listeners = []
+        this.state = undefined
+        this.dispatch({})
+      }
+
+      getState() {
+        return this.state
+      }
+
+      subscribe(listener) {
+        this.listeners.push(listener)
+        return (() => this.listeners.filter(l => l !== listener))
+      }
+
+      dispatch(action) {
+        this.state = this.reducer(this.getState(), action)
+        this.listeners.forEach(l => l())
+        return action
       }
     }
 
@@ -39,7 +66,7 @@ describe('React', () => {
       @connect()
       class Container extends Component {
         render() {
-          return <div {...this.props} />
+          return <Passthrough {...this.props} />
         }
       }
 
@@ -132,6 +159,30 @@ describe('React', () => {
       expect(stub.props.string).toBe('ab')
     })
 
+    it('should retain the store\'s context', () => {
+      const store = new ContextBoundStore(stringBuilder)
+
+      let Container = connect(
+        state => ({ string: state })
+      )(function Container(props) {
+        return <Passthrough {...props}/>
+      })
+
+      const spy = expect.spyOn(console, 'error')
+      const tree = TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <Container />
+        </ProviderMock>
+      )
+      spy.destroy()
+      expect(spy.calls.length).toBe(0)
+
+      const stub = TestUtils.findRenderedComponentWithType(tree, Passthrough)
+      expect(stub.props.string).toBe('')
+      store.dispatch({ type: 'APPEND', body: 'a' })
+      expect(stub.props.string).toBe('a')
+    })
+
     it('should handle dispatches before componentDidMount', () => {
       const store = createStore(stringBuilder)
 
@@ -199,6 +250,44 @@ describe('React', () => {
       const stub = TestUtils.findRenderedComponentWithType(container, Passthrough)
       expect(stub.props.foo).toEqual('bar')
       expect(stub.props.pass).toEqual('through')
+    })
+
+    it('should handle unexpected prop changes with forceUpdate()', () => {
+      const store = createStore(() => ({}))
+
+      @connect(state => state)
+      class ConnectContainer extends Component {
+        render() {
+          return (
+            <Passthrough {...this.props} pass={this.props.bar} />
+          )
+        }
+      }
+
+      class Container extends Component {
+        constructor() {
+          super()
+          this.bar = 'baz'
+        }
+
+        componentDidMount() {
+          this.bar = 'foo'
+          this.forceUpdate()
+          this.c.forceUpdate()
+        }
+
+        render() {
+          return (
+            <ProviderMock store={store}>
+              <ConnectContainer bar={this.bar} ref={c => this.c = c} />
+            </ProviderMock>
+          )
+        }
+      }
+
+      const container = TestUtils.renderIntoDocument(<Container />)
+      const stub = TestUtils.findRenderedComponentWithType(container, Passthrough)
+      expect(stub.props.bar).toEqual('foo')
     })
 
     it('should remove undefined props', () => {
@@ -313,9 +402,10 @@ describe('React', () => {
 
         componentDidMount() {
           // Simulate deep object mutation
-          this.state.bar.baz = 'through'
+          const bar = this.state.bar
+          bar.baz = 'through'
           this.setState({
-            bar: this.state.bar
+            bar
           })
         }
 
@@ -323,7 +413,7 @@ describe('React', () => {
           return (
             <ProviderMock store={store}>
               <ConnectContainer bar={this.state.bar} />
-             </ProviderMock>
+            </ProviderMock>
           )
         }
       }
@@ -426,10 +516,12 @@ describe('React', () => {
 
       let invocationCount = 0
 
-      @connect(() => {
+      /*eslint-disable no-unused-vars */
+      @connect((arg1) => {
         invocationCount++
         return {}
       })
+      /*eslint-enable no-unused-vars */
       class WithoutProps extends Component {
         render() {
           return <Passthrough {...this.props}/>
@@ -464,7 +556,54 @@ describe('React', () => {
       outerComponent.setFoo('BAR')
       outerComponent.setFoo('DID')
 
-      expect(invocationCount).toEqual(2)
+      expect(invocationCount).toEqual(1)
+    })
+
+    it('should invoke mapState every time props are changed if it has zero arguments', () => {
+      const store = createStore(stringBuilder)
+
+      let invocationCount = 0
+
+      @connect(() => {
+        invocationCount++
+        return {}
+      })
+
+      class WithoutProps extends Component {
+        render() {
+          return <Passthrough {...this.props}/>
+        }
+      }
+
+      class OuterComponent extends Component {
+        constructor() {
+          super()
+          this.state = { foo: 'FOO' }
+        }
+
+        setFoo(foo) {
+          this.setState({ foo })
+        }
+
+        render() {
+          return (
+            <div>
+              <WithoutProps {...this.state} />
+            </div>
+          )
+        }
+      }
+
+      let outerComponent
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <OuterComponent ref={c => outerComponent = c} />
+        </ProviderMock>
+      )
+      outerComponent.setFoo('BAR')
+      outerComponent.setFoo('DID')
+
+      expect(invocationCount).toEqual(3)
     })
 
     it('should invoke mapState every time props are changed if it has a second argument', () => {
@@ -513,7 +652,7 @@ describe('React', () => {
       outerComponent.setFoo('BAR')
       outerComponent.setFoo('BAZ')
 
-      expect(invocationCount).toEqual(4)
+      expect(invocationCount).toEqual(3)
       expect(propsPassedIn).toEqual({
         foo: 'BAZ'
       })
@@ -524,10 +663,12 @@ describe('React', () => {
 
       let invocationCount = 0
 
-      @connect(null, () => {
+      /*eslint-disable no-unused-vars */
+      @connect(null, (arg1) => {
         invocationCount++
         return {}
       })
+      /*eslint-enable no-unused-vars */
       class WithoutProps extends Component {
         render() {
           return <Passthrough {...this.props}/>
@@ -564,6 +705,54 @@ describe('React', () => {
       outerComponent.setFoo('DID')
 
       expect(invocationCount).toEqual(1)
+    })
+
+    it('should invoke mapDispatch every time props are changed if it has zero arguments', () => {
+      const store = createStore(stringBuilder)
+
+      let invocationCount = 0
+
+      @connect(null, () => {
+        invocationCount++
+        return {}
+      })
+
+      class WithoutProps extends Component {
+        render() {
+          return <Passthrough {...this.props}/>
+        }
+      }
+
+      class OuterComponent extends Component {
+        constructor() {
+          super()
+          this.state = { foo: 'FOO' }
+        }
+
+        setFoo(foo) {
+          this.setState({ foo })
+        }
+
+        render() {
+          return (
+            <div>
+              <WithoutProps {...this.state} />
+            </div>
+          )
+        }
+      }
+
+      let outerComponent
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <OuterComponent ref={c => outerComponent = c} />
+        </ProviderMock>
+      )
+
+      outerComponent.setFoo('BAR')
+      outerComponent.setFoo('DID')
+
+      expect(invocationCount).toEqual(3)
     })
 
     it('should invoke mapDispatch every time props are changed if it has a second argument', () => {
@@ -714,12 +903,173 @@ describe('React', () => {
         div
       )
 
-      expect(mapStateToPropsCalls).toBe(2)
+      expect(mapStateToPropsCalls).toBe(1)
       const spy = expect.spyOn(console, 'error')
       store.dispatch({ type: 'APPEND', body: 'a' })
       spy.destroy()
       expect(spy.calls.length).toBe(0)
-      expect(mapStateToPropsCalls).toBe(2)
+      expect(mapStateToPropsCalls).toBe(1)
+    })
+
+    it('should not attempt to notify unmounted child of state change', () => {
+      const store = createStore(stringBuilder)
+
+      @connect((state) => ({ hide: state === 'AB' }))
+      class App extends Component {
+        render() {
+          return this.props.hide ? null : <Container />
+        }
+      }
+
+      @connect(() => ({}))
+      class Container extends Component {
+        render() {
+          return (
+            <Child />
+          )
+        }
+      }
+
+      @connect((state) => ({ state }))
+      class Child extends Component {
+        componentWillReceiveProps(nextProps) {
+          if (nextProps.state === 'A') {
+            store.dispatch({ type: 'APPEND', body: 'B' });
+          }
+        }
+        render() {
+          return null;
+        }
+      }
+
+      const div = document.createElement('div')
+      ReactDOM.render(
+        <ProviderMock store={store}>
+          <App />
+        </ProviderMock>,
+        div
+      )
+
+      try {
+        store.dispatch({ type: 'APPEND', body: 'A' })
+      } finally {
+        ReactDOM.unmountComponentAtNode(div)
+      }
+    })
+
+    it('should not attempt to set state after unmounting nested components', () => {
+      const store = createStore(() => ({}))
+      let mapStateToPropsCalls = 0
+
+      let linkA, linkB
+
+      let App = ({ children, setLocation }) => {
+        const onClick = to => event => {
+          event.preventDefault()
+          setLocation(to)
+        }
+        /* eslint-disable react/jsx-no-bind */
+        return (
+          <div>
+            <a href="#" onClick={onClick('a')} ref={c => { linkA = c }}>A</a>
+            <a href="#" onClick={onClick('b')} ref={c => { linkB = c }}>B</a>
+            {children}
+          </div>
+        )
+        /* eslint-enable react/jsx-no-bind */
+      }
+      App = connect(() => ({}))(App)
+
+
+      let A = () => (<h1>A</h1>)
+      A = connect(() => ({ calls: ++mapStateToPropsCalls }))(A)
+
+
+      const B = () => (<h1>B</h1>)
+
+
+      class RouterMock extends React.Component {
+        constructor(...args) {
+          super(...args)
+          this.state = { location: { pathname: 'a' } }
+          this.setLocation = this.setLocation.bind(this)
+        }
+
+        setLocation(pathname) {
+          this.setState({ location: { pathname } })
+          store.dispatch({ type: 'TEST' })
+        }
+
+        getChildComponent(location) {
+          switch (location) {
+            case 'a': return <A />
+            case 'b': return <B />
+            default: throw new Error('Unknown location: ' + location)
+          }
+        }
+
+        render() {
+          return (<App setLocation={this.setLocation}>
+            {this.getChildComponent(this.state.location.pathname)}
+          </App>)
+        }
+      }
+
+
+      const div = document.createElement('div')
+      document.body.appendChild(div)
+      ReactDOM.render(
+        (<ProviderMock store={store}>
+          <RouterMock />
+        </ProviderMock>),
+        div
+      )
+
+      const spy = expect.spyOn(console, 'error')
+
+      linkA.click()
+      linkB.click()
+      linkB.click()
+
+      spy.destroy()
+      document.body.removeChild(div)
+      expect(mapStateToPropsCalls).toBe(3)
+      expect(spy.calls.length).toBe(0)
+    })
+
+    it('should not attempt to set state when dispatching in componentWillUnmount', () => {
+      const store = createStore(stringBuilder)
+      let mapStateToPropsCalls = 0
+
+      /*eslint-disable no-unused-vars */
+      @connect(
+        (state) => ({ calls: mapStateToPropsCalls++ }),
+        dispatch => ({ dispatch })
+      )
+      /*eslint-enable no-unused-vars */
+      class Container extends Component {
+        componentWillUnmount() {
+          this.props.dispatch({ type: 'APPEND', body: 'a' })
+        }
+        render() {
+          return <Passthrough {...this.props} />
+        }
+      }
+
+      const div = document.createElement('div')
+      ReactDOM.render(
+        <ProviderMock store={store}>
+          <Container />
+        </ProviderMock>,
+        div
+      )
+      expect(mapStateToPropsCalls).toBe(1)
+
+      const spy = expect.spyOn(console, 'error')
+      ReactDOM.unmountComponentAtNode(div)
+      spy.destroy()
+      expect(spy.calls.length).toBe(0)
+      expect(mapStateToPropsCalls).toBe(1)
     })
 
     it('should shallowly compare the selected state to prevent unnecessary updates', () => {
@@ -845,6 +1195,12 @@ describe('React', () => {
       expect(stub.props.passVal).toBe('otherval')
     })
 
+    it('should throw an error if a component is not passed to the function returned by connect', () => {
+      expect(connect()).toThrow(
+        /You must pass a component to the function/
+      )
+    })
+
     it('should throw an error if mapState, mapDispatch, or mergeProps returns anything but a plain object', () => {
       const store = createStore(() => ({}))
 
@@ -861,77 +1217,113 @@ describe('React', () => {
 
       function AwesomeMap() { }
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => 1, () => ({}), () => ({}))}
-          </ProviderMock>
-        )
-      }).toThrow(/mapState/)
+      let spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => 1, () => ({}), () => ({}))}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mapStateToProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => 'hey', () => ({}), () => ({}))}
-          </ProviderMock>
-        )
-      }).toThrow(/mapState/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => 'hey', () => ({}), () => ({}))}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mapStateToProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => new AwesomeMap(), () => ({}), () => ({}))}
-          </ProviderMock>
-        )
-      }).toThrow(/mapState/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => new AwesomeMap(), () => ({}), () => ({}))}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mapStateToProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => ({}), () => 1, () => ({}))}
-          </ProviderMock>
-        )
-      }).toThrow(/mapDispatch/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => ({}), () => 1, () => ({}))}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mapDispatchToProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => ({}), () => 'hey', () => ({}))}
-          </ProviderMock>
-        )
-      }).toThrow(/mapDispatch/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => ({}), () => 'hey', () => ({}))}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mapDispatchToProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => ({}), () => new AwesomeMap(), () => ({}))}
-          </ProviderMock>
-        )
-      }).toThrow(/mapDispatch/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => ({}), () => new AwesomeMap(), () => ({}))}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mapDispatchToProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => ({}), () => ({}), () => 1)}
-          </ProviderMock>
-        )
-      }).toThrow(/mergeProps/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => ({}), () => ({}), () => 1)}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mergeProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => ({}), () => ({}), () => 'hey')}
-          </ProviderMock>
-        )
-      }).toThrow(/mergeProps/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => ({}), () => ({}), () => 'hey')}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mergeProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
 
-      expect(() => {
-        TestUtils.renderIntoDocument(
-          <ProviderMock store={store}>
-            {makeContainer(() => ({}), () => ({}), () => new AwesomeMap())}
-          </ProviderMock>
-        )
-      }).toThrow(/mergeProps/)
+      spy = expect.spyOn(console, 'error')
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          {makeContainer(() => ({}), () => ({}), () => new AwesomeMap())}
+        </ProviderMock>
+      )
+      expect(spy.calls.length).toBe(1)
+      expect(spy.calls[0].arguments[0]).toMatch(
+        /mergeProps\(\) in Connect\(Container\) must return a plain object/
+      )
+      spy.destroy()
     })
 
     it('should recalculate the state and rebind the actions on hot update', () => {
@@ -985,13 +1377,14 @@ describe('React', () => {
 
       function imitateHotReloading(TargetClass, SourceClass) {
         // Crude imitation of hot reloading that does the job
-        Object.keys(SourceClass.prototype).filter(key =>
+        Object.getOwnPropertyNames(SourceClass.prototype).filter(key =>
           typeof SourceClass.prototype[key] === 'function'
         ).forEach(key => {
-          if (key !== 'render') {
+          if (key !== 'render' && key !== 'constructor') {
             TargetClass.prototype[key] = SourceClass.prototype[key]
           }
         })
+
         container.forceUpdate()
       }
 
@@ -1023,11 +1416,15 @@ describe('React', () => {
       ).displayName).toBe('Connect(Bar)')
 
       expect(connect(state => state)(
+        // eslint: In this case, we don't want to specify a displayName because we're testing what
+        // happens when one isn't defined.
+        /* eslint-disable react/display-name */
         createClass({
           render() {
             return <div />
           }
         })
+        /* eslint-enable react/display-name */
       ).displayName).toBe('Connect(Component)')
     })
 
@@ -1046,13 +1443,13 @@ describe('React', () => {
 
     it('should hoist non-react statics from wrapped component', () => {
       class Container extends Component {
-        static howIsRedux = () => 'Awesome!'
-        static foo = 'bar'
-
         render() {
           return <Passthrough />
         }
       }
+
+      Container.howIsRedux = () => 'Awesome!'
+      Container.foo = 'bar'
 
       const decorator = connect(state => state)
       const decorated = decorator(Container)
@@ -1101,9 +1498,7 @@ describe('React', () => {
       expect(() =>
         TestUtils.renderIntoDocument(<Decorated />)
       ).toThrow(
-        'Invariant Violation: Could not find "store" in either the context ' +
-        'or props of "Connect(Container)". Either wrap the root component in a ' +
-        '<Provider>, or explicitly pass "store" as a prop to "Connect(Container)".'
+        /Could not find "store"/
       )
     })
 
@@ -1127,7 +1522,7 @@ describe('React', () => {
 
       const decorated = TestUtils.findRenderedComponentWithType(tree, Decorated)
       expect(() => decorated.getWrappedInstance()).toThrow(
-        /To access the wrapped instance, you need to specify \{ withRef: true \} as the fourth argument of the connect\(\) call\./
+        /To access the wrapped instance, you need to specify \{ withRef: true \} in the options argument of the connect\(\) call\./
       )
     })
 
@@ -1161,32 +1556,29 @@ describe('React', () => {
 
       expect(() => decorated.someInstanceMethod()).toThrow()
       expect(decorated.getWrappedInstance().someInstanceMethod()).toBe(someData)
-      expect(decorated.refs.wrappedInstance.someInstanceMethod()).toBe(someData)
+      expect(decorated.wrappedInstance.someInstanceMethod()).toBe(someData)
     })
 
     it('should wrap impure components without supressing updates', () => {
       const store = createStore(() => ({}))
 
       class ImpureComponent extends Component {
-        static contextTypes = {
-          statefulValue: React.PropTypes.number
-        }
-
         render() {
           return <Passthrough statefulValue={this.context.statefulValue} />
         }
+      }
+
+      ImpureComponent.contextTypes = {
+        statefulValue: PropTypes.number
       }
 
       const decorator = connect(state => state, null, null, { pure: false })
       const Decorated = decorator(ImpureComponent)
 
       class StatefulWrapper extends Component {
-        state = {
-          value: 0
-        }
-
-        static childContextTypes = {
-          statefulValue: React.PropTypes.number
+        constructor() {
+          super()
+          this.state = { value: 0 }
         }
 
         getChildContext() {
@@ -1198,6 +1590,10 @@ describe('React', () => {
         render() {
           return <Decorated />
         }
+      }
+
+      StatefulWrapper.childContextTypes = {
+        statefulValue: PropTypes.number
       }
 
       const tree = TestUtils.renderIntoDocument(
@@ -1240,14 +1636,17 @@ describe('React', () => {
       const Decorated = decorator(ImpureComponent)
 
       class StatefulWrapper extends Component {
-        state = {
-          storeGetter: { storeKey: 'foo' }
+        constructor() {
+          super()
+          this.state = {
+            storeGetter: { storeKey: 'foo' }
+          }
         }
-
         render() {
           return <Decorated storeGetter={this.state.storeGetter} />
         }
       }
+
 
       const tree = TestUtils.renderIntoDocument(
         <ProviderMock store={store}>
@@ -1313,28 +1712,22 @@ describe('React', () => {
         </ProviderMock>
       )
 
-      expect(childMapStateInvokes).toBe(2)
+      expect(childMapStateInvokes).toBe(1)
 
       // The store state stays consistent when setState calls are batched
       ReactDOM.unstable_batchedUpdates(() => {
         store.dispatch({ type: 'APPEND', body: 'c' })
       })
-      expect(childMapStateInvokes).toBe(3)
+      expect(childMapStateInvokes).toBe(2)
 
       // setState calls DOM handlers are batched
       const container = TestUtils.findRenderedComponentWithType(tree, Container)
       const node = container.getWrappedInstance().refs.button
       TestUtils.Simulate.click(node)
-      expect(childMapStateInvokes).toBe(4)
+      expect(childMapStateInvokes).toBe(3)
 
-      // In future all setState calls will be batched[1]. Uncomment when it
-      // happens. For now redux-batched-updates middleware can be used as
-      // workaround this.
-      //
-      // [1]: https://twitter.com/sebmarkbage/status/642366976824864768
-      //
-      // store.dispatch({ type: 'APPEND', body: 'd' })
-      // expect(childMapStateInvokes).toBe(5)
+      store.dispatch({ type: 'APPEND', body: 'd' })
+      expect(childMapStateInvokes).toBe(4)
     })
 
     it('should not render the wrapped component when mapState does not produce change', () => {
@@ -1360,14 +1753,503 @@ describe('React', () => {
       )
 
       expect(renderCalls).toBe(1)
-      expect(mapStateCalls).toBe(2)
+      expect(mapStateCalls).toBe(1)
 
       store.dispatch({ type: 'APPEND', body: 'a' })
 
       // After store a change mapState has been called
-      expect(mapStateCalls).toBe(3)
+      expect(mapStateCalls).toBe(2)
       // But render is not because it did not make any actual changes
       expect(renderCalls).toBe(1)
+    })
+
+    it('should bail out early if mapState does not depend on props', () => {
+      const store = createStore(stringBuilder)
+      let renderCalls = 0
+      let mapStateCalls = 0
+
+      @connect(state => {
+        mapStateCalls++
+        return state === 'aaa' ? { change: 1 } : {}
+      })
+      class Container extends Component {
+        render() {
+          renderCalls++
+          return <Passthrough {...this.props} />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <Container />
+        </ProviderMock>
+      )
+
+      expect(renderCalls).toBe(1)
+      expect(mapStateCalls).toBe(1)
+
+      const spy = expect.spyOn(Container.prototype, 'setState').andCallThrough()
+
+      store.dispatch({ type: 'APPEND', body: 'a' })
+      expect(mapStateCalls).toBe(2)
+      expect(renderCalls).toBe(1)
+      expect(spy.calls.length).toBe(0)
+
+      store.dispatch({ type: 'APPEND', body: 'a' })
+      expect(mapStateCalls).toBe(3)
+      expect(renderCalls).toBe(1)
+      expect(spy.calls.length).toBe(0)
+
+      store.dispatch({ type: 'APPEND', body: 'a' })
+      expect(mapStateCalls).toBe(4)
+      expect(renderCalls).toBe(2)
+      expect(spy.calls.length).toBe(1)
+
+      spy.destroy()
+    })
+
+    it('should not swallow errors when bailing out early', () => {
+      const store = createStore(stringBuilder)
+      let renderCalls = 0
+      let mapStateCalls = 0
+
+      @connect(state => {
+        mapStateCalls++
+        if (state === 'a') {
+          throw new Error('Oops')
+        } else {
+          return {}
+        }
+      })
+      class Container extends Component {
+        render() {
+          renderCalls++
+          return <Passthrough {...this.props} />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <Container />
+        </ProviderMock>
+      )
+
+      expect(renderCalls).toBe(1)
+      expect(mapStateCalls).toBe(1)
+      expect(
+        () => store.dispatch({ type: 'APPEND', body: 'a' })
+      ).toThrow('Oops')
+    })
+
+    it('should allow providing a factory function to mapStateToProps', () => {
+      let updatedCount = 0
+      let memoizedReturnCount = 0
+      const store = createStore(() => ({ value: 1 }))
+
+      const mapStateFactory = () => {
+        let lastProp, lastVal, lastResult
+        return (state, props) => {
+          if (props.name === lastProp && lastVal === state.value) {
+            memoizedReturnCount++
+            return lastResult
+          }
+          lastProp = props.name
+          lastVal = state.value
+          return lastResult = { someObject: { prop: props.name, stateVal: state.value } }
+        }
+      }
+
+      @connect(mapStateFactory)
+      class Container extends Component {
+        componentWillUpdate() {
+          updatedCount++
+        }
+        render() {
+          return <Passthrough {...this.props} />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <div>
+            <Container name="a" />
+            <Container name="b" />
+          </div>
+        </ProviderMock>
+      )
+
+      store.dispatch({ type: 'test' })
+      expect(updatedCount).toBe(0)
+      expect(memoizedReturnCount).toBe(2)
+    })
+
+    it('should allow a mapStateToProps factory consuming just state to return a function that gets ownProps', () => {
+      const store = createStore(() => ({ value: 1 }))
+
+      let initialState
+      let initialOwnProps
+      let secondaryOwnProps
+      const mapStateFactory = function (factoryInitialState) {
+        initialState = factoryInitialState
+        initialOwnProps = arguments[1];
+        return (state, props) => {
+          secondaryOwnProps = props
+          return { }
+        }
+      }
+
+      @connect(mapStateFactory)
+      class Container extends Component {
+        render() {
+          return <Passthrough {...this.props} />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <div>
+            <Container name="a" />
+          </div>
+        </ProviderMock>
+      )
+
+      store.dispatch({ type: 'test' })
+      expect(initialOwnProps).toBe(undefined)
+      expect(initialState).toNotBe(undefined)
+      expect(secondaryOwnProps).toNotBe(undefined)
+      expect(secondaryOwnProps.name).toBe("a")
+    })
+
+    it('should allow providing a factory function to mapDispatchToProps', () => {
+      let updatedCount = 0
+      let memoizedReturnCount = 0
+      const store = createStore(() => ({ value: 1 }))
+
+      const mapDispatchFactory = () => {
+        let lastProp, lastResult
+        return (dispatch, props) => {
+          if (props.name === lastProp) {
+            memoizedReturnCount++
+            return lastResult
+          }
+          lastProp = props.name
+          return lastResult = { someObject: { dispatchFn: dispatch } }
+        }
+      }
+      function mergeParentDispatch(stateProps, dispatchProps, parentProps) {
+        return { ...stateProps, ...dispatchProps, name: parentProps.name }
+      }
+
+      @connect(null, mapDispatchFactory, mergeParentDispatch)
+      class Passthrough extends Component {
+        componentWillUpdate() {
+          updatedCount++
+        }
+        render() {
+          return <div />
+        }
+      }
+
+      class Container extends Component {
+        constructor(props) {
+          super(props)
+          this.state = { count: 0 }
+        }
+        componentDidMount() {
+          this.setState({ count: 1 })
+        }
+        render() {
+          const { count } = this.state
+          return (
+            <div>
+              <Passthrough count={count} name="a" />
+              <Passthrough count={count} name="b" />
+            </div>
+          )
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <Container />
+        </ProviderMock>
+      )
+
+      store.dispatch({ type: 'test' })
+      expect(updatedCount).toBe(0)
+      expect(memoizedReturnCount).toBe(2)
+    })
+
+    it('should not call update if mergeProps return value has not changed', () => {
+      let mapStateCalls = 0
+      let renderCalls = 0
+      const store = createStore(stringBuilder)
+
+      @connect(() => ({ a: ++mapStateCalls }), null, () => ({ changed: false }))
+      class Container extends Component {
+        render() {
+          renderCalls++
+          return <Passthrough {...this.props} />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <Container />
+        </ProviderMock>
+      )
+
+      expect(renderCalls).toBe(1)
+      expect(mapStateCalls).toBe(1)
+
+      store.dispatch({ type: 'APPEND', body: 'a' })
+
+      expect(mapStateCalls).toBe(2)
+      expect(renderCalls).toBe(1)
+    })
+
+    it('should update impure components with custom mergeProps', () => {
+      let store = createStore(() => ({}))
+      let renderCount = 0
+
+      @connect(null, null, () => ({ a: 1 }), { pure: false })
+      class Container extends React.Component {
+        render() {
+          ++renderCount
+          return <div />
+        }
+      }
+
+      class Parent extends React.Component {
+        componentDidMount() {
+          this.forceUpdate()
+        }
+        render() {
+          return <Container />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <Parent>
+            <Container />
+          </Parent>
+        </ProviderMock>
+      )
+
+      expect(renderCount).toBe(2)
+    })
+
+    it('should allow to clean up child state in parent componentWillUnmount', () => {
+      function reducer(state = { data: null }, action) {
+        switch (action.type) {
+          case 'fetch':
+            return { data: { profile: { name: 'April' } } }
+          case 'clean':
+            return { data: null }
+          default:
+            return state
+        }
+      }
+
+      @connect(null)
+      class Parent extends React.Component {
+        componentWillMount() {
+          this.props.dispatch({ type: 'fetch' })
+        }
+
+        componentWillUnmount() {
+          this.props.dispatch({ type: 'clean' })
+        }
+
+        render() {
+          return <Child />
+        }
+      }
+
+      @connect(state => ({
+        profile: state.data.profile
+      }))
+      class Child extends React.Component {
+        render() {
+          return null
+        }
+      }
+
+      const store = createStore(reducer)
+      const div = document.createElement('div')
+      ReactDOM.render(
+        <ProviderMock store={store}>
+          <Parent />
+        </ProviderMock>,
+        div
+      )
+
+      ReactDOM.unmountComponentAtNode(div)
+    })
+
+    it('should allow custom displayName', () => {
+      @connect(null, null, null, { getDisplayName: name => `Custom(${name})` })
+      class MyComponent extends React.Component {
+        render() {
+          return <div></div>
+        }
+      }
+
+      expect(MyComponent.displayName).toEqual('Custom(MyComponent)')
+    })
+
+    it('should update impure components whenever the state of the store changes', () => {
+      const store = createStore(() => ({}))
+      let renderCount = 0
+
+      @connect(() => ({}), null, null, { pure: false })
+      class ImpureComponent extends React.Component {
+        render() {
+          ++renderCount
+          return <div />
+        }
+      }
+
+      TestUtils.renderIntoDocument(
+        <ProviderMock store={store}>
+          <ImpureComponent />
+        </ProviderMock>
+      )
+
+      const rendersBeforeStateChange = renderCount
+      store.dispatch({ type: 'ACTION' })
+      expect(renderCount).toBe(rendersBeforeStateChange + 1)
+    })
+
+    function renderWithBadConnect(Component) {
+      const store = createStore(() => ({}))
+
+      try {
+        TestUtils.renderIntoDocument(
+          <ProviderMock store={store}>
+            <Component pass="through" />
+          </ProviderMock>
+        )
+        return null
+      } catch (error) {
+        return error.message
+      }
+    }
+    it('should throw a helpful error for invalid mapStateToProps arguments', () => {
+      @connect('invalid')
+      class InvalidMapState extends React.Component { render() { return <div></div> } }
+
+      const error = renderWithBadConnect(InvalidMapState)
+      expect(error).toInclude('string')
+      expect(error).toInclude('mapStateToProps')
+      expect(error).toInclude('InvalidMapState')
+    })
+    it('should throw a helpful error for invalid mapDispatchToProps arguments', () => {
+      @connect(null, 'invalid')
+      class InvalidMapDispatch extends React.Component { render() { return <div></div> } }
+
+      const error = renderWithBadConnect(InvalidMapDispatch)
+      expect(error).toInclude('string')
+      expect(error).toInclude('mapDispatchToProps')
+      expect(error).toInclude('InvalidMapDispatch')
+    })
+    it('should throw a helpful error for invalid mergeProps arguments', () => {
+      @connect(null, null, 'invalid')
+      class InvalidMerge extends React.Component { render() { return <div></div> } }
+
+      const error = renderWithBadConnect(InvalidMerge)
+      expect(error).toInclude('string')
+      expect(error).toInclude('mergeProps')
+      expect(error).toInclude('InvalidMerge')
+    })
+
+    it('should notify nested components through a blocking component', () => {
+      @connect(state => ({ count: state }))
+      class Parent extends Component {
+        render() { return <BlockUpdates><Child /></BlockUpdates> }
+      }
+
+      class BlockUpdates extends Component {
+        shouldComponentUpdate() { return false; }
+        render() { return this.props.children; }
+      }
+
+      const mapStateToProps = expect.createSpy().andCall(state => ({ count: state }))
+      @connect(mapStateToProps)
+      class Child extends Component {
+        render() { return <div>{this.props.count}</div> }
+      }
+
+      const store = createStore((state = 0, action) => (action.type === 'INC' ? state + 1 : state))
+      TestUtils.renderIntoDocument(<ProviderMock store={store}><Parent /></ProviderMock>)
+
+      expect(mapStateToProps.calls.length).toBe(1)
+      store.dispatch({ type: 'INC' })
+      expect(mapStateToProps.calls.length).toBe(2)
+    })
+
+    it('should subscribe properly when a middle connected component does not subscribe', () => {
+
+      @connect(state => ({ count: state }))
+      class A extends React.Component { render() { return <B {...this.props} /> }}
+
+      @connect() // no mapStateToProps. therefore it should be transparent for subscriptions
+      class B extends React.Component { render() { return <C {...this.props} /> }}
+
+      @connect((state, props) => {
+        expect(props.count).toBe(state)
+        return { count: state * 10 + props.count }
+      })
+      class C extends React.Component { render() { return <div>{this.props.count}</div> }}
+
+      const store = createStore((state = 0, action) => (action.type === 'INC' ? state += 1 : state))
+      TestUtils.renderIntoDocument(<ProviderMock store={store}><A /></ProviderMock>)
+
+      store.dispatch({ type: 'INC' })
+    })
+
+    it('should subscribe properly when a new store is provided via props', () => {
+      const store1 = createStore((state = 0, action) => (action.type === 'INC' ? state + 1 : state))
+      const store2 = createStore((state = 0, action) => (action.type === 'INC' ? state + 1 : state))
+
+      @connect(state => ({ count: state }))
+      class A extends Component {
+        render() { return <B store={store2} /> }
+      }
+
+      const mapStateToPropsB = expect.createSpy().andCall(state => ({ count: state }))
+      @connect(mapStateToPropsB)
+      class B extends Component {
+        render() { return <C {...this.props} /> }
+      }
+
+      const mapStateToPropsC = expect.createSpy().andCall(state => ({ count: state }))
+      @connect(mapStateToPropsC)
+      class C extends Component {
+        render() { return <D /> }
+      }
+
+      const mapStateToPropsD = expect.createSpy().andCall(state => ({ count: state }))
+      @connect(mapStateToPropsD)
+      class D extends Component {
+        render() { return <div>{this.props.count}</div> }
+      }
+
+      TestUtils.renderIntoDocument(<ProviderMock store={store1}><A /></ProviderMock>)
+      expect(mapStateToPropsB.calls.length).toBe(1)
+      expect(mapStateToPropsC.calls.length).toBe(1)
+      expect(mapStateToPropsD.calls.length).toBe(1)
+
+      store1.dispatch({ type: 'INC' })
+      expect(mapStateToPropsB.calls.length).toBe(1)
+      expect(mapStateToPropsC.calls.length).toBe(1)
+      expect(mapStateToPropsD.calls.length).toBe(2)
+
+      store2.dispatch({ type: 'INC' })
+      expect(mapStateToPropsB.calls.length).toBe(2)
+      expect(mapStateToPropsC.calls.length).toBe(2)
+      expect(mapStateToPropsD.calls.length).toBe(2)
     })
   })
 })
